@@ -110,14 +110,39 @@
                     </div>
                     <pre id="workerCode" class="text-xs text-green-400 overflow-x-auto"><code>export default {
   async fetch(request) {
+    // Headers CORS
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    // Manejar preflight OPTIONS
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
     // Solo permitir POST
     if (request.method !== 'POST') {
-      return new Response('Method not allowed', { status: 405 });
+      return new Response('Method not allowed', { 
+        status: 405,
+        headers: corsHeaders
+      });
     }
 
     try {
       const body = await request.json();
       const { token, databaseId } = body;
+
+      if (!token || !databaseId) {
+        return new Response(
+          JSON.stringify({ error: 'Token y databaseId son requeridos' }), 
+          {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
 
       // Llamar a Notion API
       const response = await fetch(
@@ -140,20 +165,21 @@
       // Devolver respuesta con CORS
       return new Response(JSON.stringify(data), {
         headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST',
-          'Access-Control-Allow-Headers': 'Content-Type'
+          ...corsHeaders,
+          'Content-Type': 'application/json'
         }
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
+      return new Response(
+        JSON.stringify({ error: error.message }), 
+        {
+          status: 500,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json'
+          }
         }
-      });
+      );
     }
   }
 }</code></pre>
@@ -363,10 +389,14 @@
             timelineContainer.style.display = 'none';
 
             try {
+                console.log('Enviando petición a:', config.workerUrl);
+                console.log('Con datos:', { databaseId: config.databaseId });
+
                 const response = await fetch(config.workerUrl, {
                     method: 'POST',
+                    mode: 'cors',
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
                         token: config.token,
@@ -374,11 +404,16 @@
                     })
                 });
 
+                console.log('Respuesta status:', response.status);
+
                 if (!response.ok) {
-                    throw new Error(`Error ${response.status}: ${response.statusText}`);
+                    const errorText = await response.text();
+                    console.error('Error response:', errorText);
+                    throw new Error(`Error ${response.status}: ${errorText || response.statusText}`);
                 }
 
                 const data = await response.json();
+                console.log('Datos recibidos:', data);
                 
                 if (data.error) {
                     throw new Error(data.error);
@@ -390,83 +425,153 @@
                     loadingState.style.display = 'none';
                     timelineContainer.style.display = 'block';
                 } else {
-                    throw new Error('Respuesta inválida de Notion');
+                    throw new Error('Respuesta inválida de Notion: ' + JSON.stringify(data));
                 }
             } catch (error) {
+                console.error('Error completo:', error);
                 loadingState.style.display = 'none';
                 errorState.style.display = 'block';
                 document.getElementById('errorMessage').textContent = error.message;
             }
         }
 
-        // Render payments
+        // Render payments with daily timeline
         function renderPayments(payments) {
             const container = document.getElementById('paymentsContainer');
             container.innerHTML = '';
+
+            // Crear un mapa de pagos por fecha
+            const paymentsByDate = {};
+            payments.forEach(payment => {
+                const props = payment.properties;
+                const dueDate = props.DueDate?.date?.start;
+                if (dueDate) {
+                    const dateKey = dueDate.split('T')[0]; // YYYY-MM-DD
+                    if (!paymentsByDate[dateKey]) {
+                        paymentsByDate[dateKey] = [];
+                    }
+                    paymentsByDate[dateKey].push(payment);
+                }
+            });
+
+            // Generar timeline de 30 días desde hoy
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const daysToShow = 30;
+
+            for (let i = 0; i < daysToShow; i++) {
+                const currentDate = new Date(today);
+                currentDate.setDate(today.getDate() + i);
+                const dateKey = currentDate.toISOString().split('T')[0];
+                
+                const paymentsForDay = paymentsByDate[dateKey] || [];
+                const isToday = i === 0;
+
+                // Renderizar el día
+                renderDay(currentDate, paymentsForDay, isToday, container);
+            }
 
             if (payments.length === 0) {
                 container.innerHTML = `
                     <div class="text-center py-12">
                         <span class="material-symbols-outlined text-6xl text-slate-300">inbox</span>
                         <p class="mt-4 text-slate-500">No hay pagos registrados en Notion</p>
+                        <p class="text-xs text-slate-400 mt-2">El timeline muestra los próximos 30 días</p>
                     </div>
                 `;
-                return;
             }
+        }
 
-            payments.forEach(payment => {
-                const props = payment.properties;
-                const name = props.Name?.title?.[0]?.plain_text || 'Sin nombre';
-                const amount = props.Amount?.number || 0;
-                const dueDate = props.DueDate?.date?.start;
-                const category = props.Category?.select?.name || 'Default';
-                const status = props.Status?.select?.name || 'Pending';
-                const frequency = props.Frequency?.select?.name || 'One-time';
+        function renderDay(date, payments, isToday, container) {
+            const dayOfMonth = date.getDate();
+            const monthShort = date.toLocaleDateString('es', { month: 'short' });
+            const dayOfWeek = date.toLocaleDateString('es', { weekday: 'short' });
+            
+            let html = '';
 
-                if (!dueDate) return;
-
-                const date = new Date(dueDate);
-                const style = categoryStyles[category] || categoryStyles['Default'];
-                const isPaid = status === 'Paid';
-                const isOverdue = new Date() > date && !isPaid;
-
-                const dotColor = isPaid ? 'green-500' : isOverdue ? 'red-500' : 'slate-300';
+            if (payments.length === 0) {
+                // Día sin pagos - mostrar solo marcador
+                const dotColor = isToday ? 'blue-500' : 'slate-200';
+                const bgColor = isToday ? 'bg-blue-50' : '';
                 
-                container.innerHTML += `
-                    <div class="relative flex gap-6 mb-6">
+                html = `
+                    <div class="relative flex gap-6 mb-4 ${bgColor} ${isToday ? 'py-2 -mx-2 px-2 rounded-lg' : ''}">
                         <div class="relative z-10 flex flex-col items-center pt-1 w-14 shrink-0">
-                            <div class="text-base font-bold text-slate-900">${date.getDate()}</div>
-                            <div class="text-xs text-slate-500 uppercase">${date.toLocaleDateString('es', { month: 'short' })}</div>
-                            <div class="absolute right-[-10px] top-3 h-3 w-3 rounded-full border-2 border-white bg-${dotColor} shadow-sm"></div>
+                            <div class="text-base font-bold ${isToday ? 'text-blue-600' : 'text-slate-400'}">${dayOfMonth}</div>
+                            <div class="text-xs ${isToday ? 'text-blue-500' : 'text-slate-400'} uppercase">${monthShort}</div>
+                            <div class="absolute right-[-10px] top-3 h-2 w-2 rounded-full border-2 border-white bg-${dotColor} ${isToday ? 'ring-2 ring-blue-200' : ''}"></div>
                         </div>
-                        <div class="flex-1 bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all ${isPaid ? 'opacity-60' : ''}">
-                            <div class="flex flex-col sm:flex-row justify-between gap-4">
-                                <div class="flex items-start gap-4">
-                                    <div class="h-10 w-10 rounded-full bg-${style.color}-100 flex items-center justify-center text-${style.color}-600 shrink-0">
-                                        <span class="material-symbols-outlined">${style.icon}</span>
-                                    </div>
-                                    <div>
-                                        <h4 class="font-bold text-slate-900 text-lg ${isPaid ? 'line-through text-slate-400' : ''}">${name}</h4>
-                                        <div class="flex items-center gap-2 mt-1">
-                                            <span class="px-2 py-0.5 rounded text-xs font-bold uppercase bg-slate-100 text-slate-600">${category}</span>
-                                            ${isPaid ? 
-                                                '<span class="text-xs text-green-600 font-medium flex items-center gap-1"><span class="material-symbols-outlined text-sm">check_circle</span> Pagado</span>' :
-                                                isOverdue ?
-                                                '<span class="text-xs text-red-600 font-medium flex items-center gap-1"><span class="material-symbols-outlined text-sm">warning</span> Vencido</span>' :
-                                                '<span class="text-xs text-slate-500 font-medium">Pendiente</span>'
-                                            }
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="text-right">
-                                    <div class="text-xl font-bold text-slate-900">$${amount.toFixed(2)}</div>
-                                    <div class="text-xs text-slate-400">${frequency}</div>
-                                </div>
+                        <div class="flex-1 py-2">
+                            <div class="flex items-center gap-2 text-slate-400 text-sm">
+                                ${isToday ? 
+                                    '<span class="px-2 py-1 rounded-full bg-blue-100 text-blue-600 text-xs font-semibold">HOY</span>' :
+                                    `<span class="capitalize">${dayOfWeek}</span>`
+                                }
+                                ${isToday ? '' : '<span class="text-xs">Sin pagos programados</span>'}
                             </div>
                         </div>
                     </div>
                 `;
-            });
+            } else {
+                // Día con pagos
+                payments.forEach((payment, index) => {
+                    const props = payment.properties;
+                    const name = props.Name?.title?.[0]?.plain_text || 'Sin nombre';
+                    const amount = props.Amount?.number || 0;
+                    const category = props.Category?.select?.name || 'Default';
+                    const status = props.Status?.select?.name || 'Pending';
+                    const frequency = props.Frequency?.select?.name || 'One-time';
+
+                    const style = categoryStyles[category] || categoryStyles['Default'];
+                    const isPaid = status === 'Paid';
+                    const isOverdue = new Date() > date && !isPaid;
+
+                    const dotColor = isPaid ? 'green-500' : isOverdue ? 'red-500' : isToday ? 'blue-500' : 'slate-300';
+                    
+                    html += `
+                        <div class="relative flex gap-6 mb-6 ${isToday && index === 0 ? 'bg-blue-50 -mx-2 px-2 py-2 rounded-lg' : ''}">
+                            <div class="relative z-10 flex flex-col items-center pt-1 w-14 shrink-0">
+                                ${index === 0 ? `
+                                    <div class="text-base font-bold ${isToday ? 'text-blue-600' : 'text-slate-900'}">${dayOfMonth}</div>
+                                    <div class="text-xs ${isToday ? 'text-blue-500' : 'text-slate-500'} uppercase">${monthShort}</div>
+                                    <div class="absolute right-[-10px] top-3 h-3 w-3 rounded-full border-2 border-white bg-${dotColor} shadow-sm ${isToday ? 'ring-2 ring-blue-200' : ''}"></div>
+                                ` : `
+                                    <div class="h-6"></div>
+                                    <div class="absolute right-[-10px] top-3 h-2 w-2 rounded-full border-2 border-white bg-${dotColor}"></div>
+                                `}
+                            </div>
+                            <div class="flex-1 bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all ${isPaid ? 'opacity-60' : ''}">
+                                <div class="flex flex-col sm:flex-row justify-between gap-4">
+                                    <div class="flex items-start gap-4">
+                                        <div class="h-10 w-10 rounded-full bg-${style.color}-100 flex items-center justify-center text-${style.color}-600 shrink-0">
+                                            <span class="material-symbols-outlined">${style.icon}</span>
+                                        </div>
+                                        <div>
+                                            <h4 class="font-bold text-slate-900 text-lg ${isPaid ? 'line-through text-slate-400' : ''}">${name}</h4>
+                                            <div class="flex items-center gap-2 mt-1">
+                                                <span class="px-2 py-0.5 rounded text-xs font-bold uppercase bg-slate-100 text-slate-600">${category}</span>
+                                                ${isToday && index === 0 ? '<span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-600 text-xs font-bold">HOY</span>' : ''}
+                                                ${isPaid ? 
+                                                    '<span class="text-xs text-green-600 font-medium flex items-center gap-1"><span class="material-symbols-outlined text-sm">check_circle</span> Pagado</span>' :
+                                                    isOverdue ?
+                                                    '<span class="text-xs text-red-600 font-medium flex items-center gap-1"><span class="material-symbols-outlined text-sm">warning</span> Vencido</span>' :
+                                                    '<span class="text-xs text-slate-500 font-medium">Pendiente</span>'
+                                                }
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xl font-bold text-slate-900">${amount.toFixed(2)}</div>
+                                        <div class="text-xs text-slate-400">${frequency}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            container.innerHTML += html;
         }
 
         // Update stats
